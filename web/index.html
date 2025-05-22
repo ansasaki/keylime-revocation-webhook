@@ -24,7 +24,22 @@ body {
         margin: 0 auto;
     }
 
+    #revocation-container {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        max-width: 800px;
+        margin: 0 auto;
+    }
+
     .machine {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 1rem;
+        transition: background-color 0.3s ease;
+    }
+
+    .revocation {
         border: 1px solid #ccc;
         border-radius: 8px;
         padding: 1rem;
@@ -87,6 +102,11 @@ body {
             padding: 0.8rem;
         }
 
+        .revocation {
+            font-size: 0.95rem;
+            padding: 0.8rem;
+        }
+
         .header {
             font-size: 1rem;
         }
@@ -96,10 +116,14 @@ body {
     <body>
         <h1>Keylime attestation status</h1>
         <div id="machine-container"></div>
+        <h1>Revocations</h1>
+        <div id="revocation-container"></div>
 
         <script>
-            const container = document.getElementById("machine-container");
+            const machineContainer = document.getElementById("machine-container");
+            const revocationContainer = document.getElementById("revocation-container");
             const machines = {};
+            const revocations = {};
 
             const source = new EventSource("http://localhost:8080/events");
 
@@ -109,9 +133,8 @@ body {
                 "TERMINATED", "UNKNOWN"];
             const Status_FAILED = ["FAILED", "INVALIDQUOTE", "TENANTFAILED"];
 
-            source.onmessage = (event) => {
-                const updates = JSON.parse(event.data);
-                updates.monitored.forEach(update => {
+            function process_update(update) {
+                update.monitored.forEach(update => {
                     const id = update.uuid;
                     const normalizedStatus = (update.state || '').toUpperCase();
 
@@ -148,7 +171,7 @@ body {
                         div.appendChild(header);
                         div.appendChild(details);
                         div.appendChild(log);
-                        container.appendChild(div);
+                        machineContainer.appendChild(div);
 
                         machines[id] = {
                             div,
@@ -189,13 +212,83 @@ body {
                     machine.lastUpdated = now;
 
                     // Update details section
+                    const now_string = (new Date()).toLocaleString();
                     machine.details.innerHTML = `
             <p><strong>Status:</strong> ${icon} ${normalizedStatus}</p>
             <p><strong>IP:</strong> ${update.ip}</p>
+            <p><strong>Last Updated:</strong> ${now_string}</p>
           `;
                     machine.details.appendChild(machine.lastSeenElem); // Add back the "last seen" element
                     machine.details.appendChild(machine.log);
                 });
+            }
+
+            function process_revocation(payload) {
+                const now = Date.now();
+                const id = payload.agent_id;
+                const ip = payload.ip;
+
+                if (!revocations[id]) {
+                    const div = document.createElement("div");
+                    div.className = `revocation bg-failure`;
+                    div.id = `revocation-${id}`;
+
+                    const header = document.createElement("div");
+                    header.className = "header";
+                    header.textContent = `${ip} (${id}) (click to expand)`;
+                    header.onclick = () => div.classList.toggle("open");
+
+                    const details = document.createElement("div");
+                    details.className = "details";
+
+                    div.appendChild(header);
+                    div.appendChild(details);
+                    revocationContainer.appendChild(div);
+
+                    revocations[id] = {
+                        div,
+                        header,
+                        details,
+                        lastStatus: null,
+                        lastUpdated: now,
+                        lastSeenElem: document.createElement("p")
+                    };
+
+                    revocations[id].details.appendChild(revocations[id].lastSeenElem);
+                }
+
+                const rev = revocations[id];
+
+                rev.div.classList.add("flash");
+                setTimeout(() => rev.div.classList.remove("flash"), 1000);
+
+                // Parse the revocation context
+                const ctx = JSON.parse(payload.context);
+
+                // Update details section
+                rev.details.innerHTML = `
+            <p><strong>IP:</strong> ${ip}</p>
+            <p><strong>Severity label:</strong> ${payload.severity_label}</p>
+            <p><strong>TPM policy:</strong> ${payload.tpm_policy}</p>
+            <p><strong>Event time:</strong> ${payload.event_time}</p>
+            <p><strong>Event ID:</strong> ${payload.event_id}</p>
+            <p><strong>Event context:</strong> ${ctx.message}<br>
+               <ul>
+                <li> Expected: ${ctx.expected} </li>
+                <li> Measured: ${ctx.got} </li>
+               </ul>
+            </p>
+          `;
+            }
+
+            source.onmessage = (event) => {
+                const e = JSON.parse(event.data);
+                if (e.type === "update") {
+                    process_update(JSON.parse(e.msg));
+                }
+                if (e.type === "revocation") {
+                    process_revocation(JSON.parse(e.msg));
+                }
             };
 
             source.onerror = () => {
