@@ -1,5 +1,5 @@
-use actix_files::NamedFile;
 use actix_cors::Cors;
+use actix_files::NamedFile;
 use actix_web::{
     App, HttpRequest, HttpResponse, HttpServer, Responder, get, http::header, post, rt, web,
 };
@@ -59,6 +59,9 @@ struct Args {
     /// Verifier URL
     #[arg(short, long, default_value = "https://127.0.0.1:8881")]
     verifier_url: String,
+    /// Path to web directory that contains index.html
+    #[arg(short, long, default_value = "/web")]
+    web_dir_path: String,
 }
 
 fn translate_operational_state(state: u32) -> String {
@@ -247,13 +250,17 @@ async fn revocation(
 }
 
 #[get("/")]
-async fn index() -> actix_web::Result<impl Responder> {
+async fn index(data: web::Data<PathBuf>) -> actix_web::Result<impl Responder> {
+    let web_dir = data.into_inner();
     info!("Got request for index");
-    let file = NamedFile::open_async("web/index.html").await?;
+    let file = NamedFile::open_async(web_dir.join("index.html").display().to_string()).await?;
 
     let file = file
         .customize()
-        .insert_header((header::ACCESS_CONTROL_ALLOW_ORIGIN, "http://127.0.0.1:8080, http://localhost:8080"))
+        .insert_header((
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            "http://127.0.0.1:8080, http://localhost:8080",
+        ))
         .insert_header((header::ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS, POST")) // Allow specific HTTP methods
         .insert_header((header::ACCESS_CONTROL_ALLOW_HEADERS, "*")); // Allow all request headers
     Ok(file)
@@ -476,6 +483,11 @@ async fn main() -> Result<()> {
         bail!("Server key file {} not found", args.server_key);
     }
 
+    let index_path = Path::new(&args.web_dir_path).join("index.html");
+    if !index_path.exists() {
+        bail!("Dashboard index file {} not found", index_path.display());
+    }
+
     let initial_state = Status::default();
 
     // Shared watch channel
@@ -510,7 +522,10 @@ async fn main() -> Result<()> {
     let revocation_server_handle = revocation_server.handle();
     let revocation_server_task = rt::spawn(revocation_server);
 
-    info!("Listening to revocations on https://{}:{}", DEFAULT_IP, DEFAULT_HTTPS_PORT);
+    info!(
+        "Listening to revocations on https://{}:{}",
+        DEFAULT_IP, DEFAULT_HTTPS_PORT
+    );
 
     info!("Starting Keylime dashboard server");
     let dashboard_server = HttpServer::new(move || {
@@ -518,18 +533,20 @@ async fn main() -> Result<()> {
             .wrap(
                 Cors::default()
                     .allowed_origin_fn(move |origin, _req_head| {
-                        let allowed_origins = vec![
-                            "http://127.0.0.1:8080",
-                            "http://localhost:8080",
-                        ];
-                        allowed_origins.clone().iter().any(|o| origin.as_bytes() == o.as_bytes())
+                        let allowed_origins =
+                            vec!["http://127.0.0.1:8080", "http://localhost:8080"];
+                        allowed_origins
+                            .clone()
+                            .iter()
+                            .any(|o| origin.as_bytes() == o.as_bytes())
                     })
                     .allowed_methods(vec!["GET"])
                     .allowed_headers(vec!["Content-Type", "Authorization"])
-                    .supports_credentials()
+                    .supports_credentials(),
             )
             .app_data(web::Data::new(btx.clone()))
             .service(index)
+            .app_data(web::Data::new(PathBuf::from(&args.web_dir_path)))
             .service(events)
     })
     .bind((DEFAULT_IP, DEFAULT_PORT))?
@@ -539,7 +556,10 @@ async fn main() -> Result<()> {
     let dashboard_server_handle = dashboard_server.handle();
     let dashboard_server_task = rt::spawn(dashboard_server);
 
-    info!("Listening to events on http://{}:{}", DEFAULT_IP, DEFAULT_PORT);
+    info!(
+        "Listening to events on http://{}:{}",
+        DEFAULT_IP, DEFAULT_PORT
+    );
 
     let shutdown_task = rt::spawn(async move {
         let mut sigint = signal(SignalKind::interrupt()).unwrap(); //#[allow_ci]
